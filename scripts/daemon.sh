@@ -2,99 +2,87 @@
 set -euo pipefail
 
 DATA_DIR="${HOME}/.wechat-claude-code"
-PLIST_LABEL="com.wechat-claude-code.bridge"
-PLIST_PATH="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
+SERVICE_NAME="wechat-claude-code"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-is_loaded() {
-  launchctl print gui/$(id -u)/"${PLIST_LABEL}" &>/dev/null
+install_service() {
+  NODE_BIN="$(command -v node || echo '/usr/local/bin/node')"
+  mkdir -p "$DATA_DIR/logs"
+
+  cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=WeChat Claude Code Bridge
+After=network.target
+
+[Service]
+Type=simple
+User=${USER}
+WorkingDirectory=${PROJECT_DIR}
+ExecStart=${NODE_BIN} ${PROJECT_DIR}/dist/main.js start
+Restart=always
+RestartSec=5
+StandardOutput=append:${DATA_DIR}/logs/stdout.log
+StandardError=append:${DATA_DIR}/logs/stderr.log
+Environment=PATH=${NODE_BIN%/*}:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=${HOME}
+Environment=ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable "$SERVICE_NAME"
+  echo "Service installed: $SERVICE_FILE"
 }
 
-case "$1" in
+case "${1:-}" in
   start)
-    if is_loaded; then
-      echo "Already running (or plist loaded)"
-      exit 0
+    if [ ! -f "$SERVICE_FILE" ]; then
+      install_service
     fi
-    mkdir -p "$DATA_DIR/logs"
-    # Find node binary, resolving nvm/fnm/volta paths
-    NODE_BIN="$(command -v node || echo '/usr/local/bin/node')"
-    cat > "$PLIST_PATH" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${PLIST_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${NODE_BIN}</string>
-    <string>${PROJECT_DIR}/dist/main.js</string>
-    <string>start</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>${PROJECT_DIR}</string>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>${DATA_DIR}/logs/stdout.log</string>
-  <key>StandardErrorPath</key>
-  <string>${DATA_DIR}/logs/stderr.log</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${NODE_BIN%/*}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
-  </dict>
-</dict>
-</plist>
-PLIST
-    launchctl load "$PLIST_PATH"
-    echo "Started wechat-claude-code daemon"
+    systemctl start "$SERVICE_NAME"
+    echo "Started $SERVICE_NAME"
     ;;
   stop)
-    launchctl bootout "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null || true
-    rm -f "$PLIST_PATH"
-    echo "Stopped wechat-claude-code daemon"
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    echo "Stopped $SERVICE_NAME"
     ;;
   restart)
-    "$0" stop
-    sleep 1
-    "$0" start
+    systemctl restart "$SERVICE_NAME"
+    echo "Restarted $SERVICE_NAME"
     ;;
   status)
-    if is_loaded; then
-      pid=$(pgrep -f "dist/main.js start" 2>/dev/null | head -1)
-      if [ -n "$pid" ]; then
-        echo "Running (PID: $pid)"
-      else
-        echo "Loaded but not running"
-      fi
-    else
-      echo "Not running"
-    fi
+    systemctl status "$SERVICE_NAME" --no-pager
+    ;;
+  install)
+    install_service
+    echo "Run 'npm run daemon -- start' to start the service"
+    ;;
+  uninstall)
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    rm -f "$SERVICE_FILE"
+    systemctl daemon-reload
+    echo "Service uninstalled"
     ;;
   logs)
     LOG_DIR="${DATA_DIR}/logs"
-    if [ -d "$LOG_DIR" ]; then
-      latest=$(ls -t "${LOG_DIR}"/bridge-*.log 2>/dev/null | head -1)
-      if [ -n "$latest" ]; then
-        tail -100 "$latest"
-      else
-        echo "No bridge logs found. Checking stdout/stderr:"
-        for f in "${LOG_DIR}"/stdout.log "${LOG_DIR}"/stderr.log; do
-          if [ -f "$f" ]; then
-            echo "=== $(basename "$f") ==="
-            tail -30 "$f"
-          fi
-        done
-      fi
+    if systemctl list-units --full -all 2>/dev/null | grep -q "$SERVICE_NAME"; then
+      journalctl -u "$SERVICE_NAME" -n 100 --no-pager
+    elif [ -d "$LOG_DIR" ]; then
+      for f in "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log"; do
+        if [ -f "$f" ]; then
+          echo "=== $(basename "$f") ==="
+          tail -50 "$f"
+        fi
+      done
     else
       echo "No logs found"
     fi
     ;;
   *)
-    echo "Usage: daemon.sh {start|stop|restart|status|logs}"
+    echo "Usage: daemon.sh {start|stop|restart|status|install|uninstall|logs}"
     ;;
 esac

@@ -1,6 +1,5 @@
 import { createInterface } from 'node:readline';
 import process from 'node:process';
-import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 
@@ -70,15 +69,16 @@ async function runSetup(): Promise<void> {
   while (true) {
     const { qrcodeUrl, qrcodeId } = await startQrLogin();
 
-    // Generate QR code as PNG image
+    // Generate QR code: ASCII for terminal + PNG file fallback
     const QRCode = await import('qrcode');
     const pngData = await QRCode.toBuffer(qrcodeUrl, { type: 'png', width: 400, margin: 2 });
     writeFileSync(QR_PATH, pngData);
 
-    // Open with system default viewer (Preview.app on macOS)
-    execSync(`open "${QR_PATH}"`);
-    console.log('已打开二维码图片，请用微信扫描：');
-    console.log(`图片路径: ${QR_PATH}\n`);
+    // Print QR code directly in terminal (works on headless Linux servers)
+    const asciiQr = await QRCode.toString(qrcodeUrl, { type: 'terminal', small: true });
+    console.log('\n请用微信扫描以下二维码：\n');
+    console.log(asciiQr);
+    console.log(`（备用）PNG 图片路径: ${QR_PATH}\n`);
     console.log('等待扫码绑定...');
 
     try {
